@@ -10,13 +10,15 @@
 
 | 现场文件 | 处理方法 |
 | --- | --- |
-| 顶层有 `services:`，由 `docker compose` 加载 | 使用本文示例 |
+| 顶层有 `services:`，由 `docker-compose` 或 `docker compose` 加载 | 使用本文示例，现场 Compose 1.22 使用 `docker-compose` |
 | 有 `apiVersion:`、`kind: Pod` 或 `kind: Deployment` | 属于 Kubernetes 风格，不能加入 Compose 的 `devices` 字段；需确认实际管理平台、设备插件及设备映射方式 |
 | 由 `docker stack`、Podman 或自定义平台加载 | 不直接套用本文；先确认该工具支持的设备配置和启动行为 |
 
 仅知道底层使用 Docker，不能判断 YAML 格式。不能修改由 Kubernetes/平台管理的容器后再直接用 Docker 重启，否则可能被平台重建覆盖。
 
 以下步骤仅适用于已确认的 **Docker Compose、单个目标服务、一个副本、一个 UBSE 逻辑设备**。多个服务不能默认共用同一次分配。
+
+**现场版本为 docker-compose 1.22：**正文使用带连字符的 `docker-compose`。保留原 YAML 的 `version`；程序 V1 不等于文件 `version: "1"`。1.22 在解析文件版本 `2`/`2.0` 时不支持 `${变量:?提示}`，因此下面使用普通 `${变量}`，变量非空检查放在 Bash 中执行。此区别见 [Compose 1.22.0 插值实现](https://github.com/docker/compose/blob/1.22.0/compose/config/interpolation.py#L30-L34)。
 
 ## 2. 分配设备并记录结果
 
@@ -46,7 +48,7 @@ for dev in "${DEVICE_PATHS[@]}"; do
 done
 ```
 
-逻辑设备名不等于实际路径，`eid0` 不等于完整 BondingEid。不要根据另一台机器的结果填写。`export` 的路径供 Compose 展开配置；它们不会因此自动成为业务容器的环境变量。
+逻辑设备名不等于实际路径，`eid0` 不等于完整 BondingEid。不要根据另一台机器的结果填写。只替换 `export` 右侧的实际路径，不改 YAML 中的变量名；变量名区分大小写。`export` 的路径供 Compose 展开配置，须与启动命令在同一个 Bash 会话执行；它们不会因此自动成为业务容器的环境变量。
 
 ## 3. 修改原 YAML 的目标服务
 
@@ -66,9 +68,9 @@ done
 services:
   REPLACE_WITH_SERVICE_NAME:
     devices:
-      - "${VFE_PATH_1:?set VFE_PATH_1}:${VFE_PATH_1:?set VFE_PATH_1}:rw"
-      - "${VFE_PATH_2:?set VFE_PATH_2}:${VFE_PATH_2:?set VFE_PATH_2}:rw"
-      - "${BONDING_PATH:?set BONDING_PATH}:${BONDING_PATH:?set BONDING_PATH}:rw"
+      - "${VFE_PATH_1}:${VFE_PATH_1}:rw"
+      - "${VFE_PATH_2}:${VFE_PATH_2}:rw"
+      - "${BONDING_PATH}:${BONDING_PATH}:rw"
       - "/dev/ummu/tid:/dev/ummu/tid:rw"
       - "/dev/ubcore/ubcore:/dev/ubcore/ubcore:rw"
     tmpfs:
@@ -89,7 +91,7 @@ services:
 
 **入口填写示例：**原镜像入口为 `/opt/app/start.sh`，原参数为 `--config /etc/app/config.yaml`，则填 `command: ["/opt/app/start.sh", "--config", "/etc/app/config.yaml"]`。修改前结合原 YAML 和 `docker image inspect` 核对完整入口；不能只保留原来的参数。镜像必须有 `/bin/sh`、`sleep`。
 
-`$$@` 必须保留双美元符号，让 Compose 把 `$@` 留给容器内 shell。如果业务 `command` 中也有需要容器 shell 展开的变量，同样用 `$$`，例如 `$$APP_CONFIG`；设备路径的 `${VFE_PATH_1...}` 则刻意由宿主机 Compose 展开。设备映射和入口字段见 [Compose 服务规范](https://docs.docker.com/reference/compose-file/services/)，变量规则见 [Compose 插值说明](https://docs.docker.com/reference/compose-file/interpolation/)。
+`$$@` 必须保留双美元符号，让 Compose 把 `$@` 留给容器内 shell。如果业务 `command` 中也有需要容器 shell 展开的变量，同样用 `$$`，例如 `$$APP_CONFIG`；设备路径的 `${VFE_PATH_1}` 则刻意由宿主机 Compose 展开。设备映射和入口字段见 [Compose 服务规范](https://docs.docker.com/reference/compose-file/services/)，变量规则见 [Compose 插值说明](https://docs.docker.com/reference/compose-file/interpolation/)。
 
 不默认加 `privileged: true`，也不为本次设备接入修改网络模式。设备访问仍受 UID/GID、安全策略等约束；用户态库沿用原业务的兼容配置。镜像健康检查在等待期间可能失败，现场平台不能据此自动重建或提前放行业务。
 
@@ -97,18 +99,21 @@ services:
 
 修改前备份原 YAML，记录原容器的镜像、入口和部署方式。已有运行中的业务需要安排停机/重建窗口；修改 YAML 不会给现有容器热添加设备。
 
-以下示例适用于单个 Compose 文件。若现场原部署有 `-p`、多个 `-f`、`--env-file` 或特定工作目录，必须将原选项保留在 `COMPOSE` 数组中，避免创建另一个项目。路径变量和原项目变量也须在本次启动会话中可用。
+以下示例适用于单个 Compose 文件。若现场原部署有 `-p`、多个 `-f` 或特定工作目录，必须沿用原项目选项及工作目录，避免创建另一个项目。沿用原项目的 `.env`/环境变量来源，不向 1.22 命令直接添加新版的 `--env-file` 选项。路径变量和原项目变量也须在本次启动会话中可用。
 
 ```bash
 YAML='REPLACE_WITH_EXISTING_COMPOSE_FILE'
 SERVICE='REPLACE_WITH_SERVICE_NAME'
 case "$YAML:$SERVICE" in *REPLACE_*) echo '请填写原配置路径和服务名'; exit 1;; esac
-COMPOSE=(docker compose -f "$YAML")
+COMPOSE=(docker-compose -f "$YAML")
+: "${VFE_PATH_1:?未设置}" "${VFE_PATH_2:?未设置}" "${BONDING_PATH:?未设置}"
 "${COMPOSE[@]}" config --services
 "${COMPOSE[@]}" config > "$LOG_DIR/compose-resolved.yaml"
 ```
 
 检查展开结果：五个设备路径正确、原镜像/配置/网络仍在、入口无 `REPLACE_`、副本数为一，且业务原入口被完整保留。展开结果可能有凭据，日志须限制权限。不要在变量缺失或目标服务不明确时继续。
+
+上面的 `:?` 由 Bash 解析，不是写入 YAML 的 Compose 插值。若仍提示 `Invalid interpolation format ... devices`，检查 `devices` 是否残留 `:?set ...`，或误写成 `${/dev/实际路径}`。此时尚处于配置解析阶段，不要重新调用 UBSE 分配。
 
 检查通过、允许重建目标业务后执行。`--no-deps` 不启动依赖服务，依赖须已就绪：
 
@@ -163,13 +168,13 @@ docker logs --timestamps --tail 200 "$CID"
 - 需要恢复原配置时，在停机窗口还原已备份 YAML，按原项目方式重建目标服务。此前分配设备的回收须单独交由 UBSE/驱动负责人确认，不手动删除节点。
 - ABI 核对和完整命令见本文[附录 A](#附录-a-环境准备与-ubse-命令)，权限与日志说明见[附录 B](#附录-b-权限与日志)。
 
-验证记录：已在本地 ARM64 openEuler Docker 环境检查 Compose 配置，并以模拟字符设备验证非 root 容器的等待/放行、参数传递、环境变量和工作目录保留，以及重启后重新等待。Bash 命令通过语法检查；没有调用真实 UBSE 或执行 URMA expose。
+验证记录：此前已在本地 ARM64 openEuler Docker 和 Compose 5.5.1 环境检查配置，并以模拟字符设备验证非 root 容器的等待/放行、参数传递、环境变量和工作目录保留，以及重启后重新等待。此次针对 1.22 核对了版本化插值源码，并用其文件版本不高于 2.0 时采用的 Python Template 解析器验证普通变量和 `$$@`；尚未在现场 Compose 1.22 上完整运行。Bash 命令通过语法检查；没有调用真实 UBSE 或执行 URMA expose。
 
 本文未验证现场 YAML、项目启动参数或真实 URMA 通信；Compose 示例需在上述适用条件确认后使用。
 
 ## 附录 A 环境准备与 UBSE 命令
 
-按 A.1、A.2、A.3 顺序执行一次，再返回正文第 2 节查询和分配。无需再打开其他手册。
+**A.1、A.2、A.3 全部在实际运行业务容器的 Docker 宿主机执行，不是在业务容器或远程 Docker 客户端机器上。** 按顺序执行一次，再返回正文第 2 节查询和分配。无需再打开其他手册。
 
 ### A.1 检查环境
 
@@ -206,7 +211,7 @@ UBSE_SOCKET=''
 date -Is | tee "$LOG_DIR/start-time.txt"
 ```
 
-`UBSE_SOCKET=''` 使用默认 `/var/run/ubse/ubse.sock`，现场不同则填写实际路径。无需访问 containerd socket。
+`UBSE_SOCKET=''` 表示让客户端使用默认 `/var/run/ubse/ubse.sock`，使用默认路径时无需填写。可以用 `ls -l /var/run/ubse/ubse.sock` 检查；只有现场配置了其他路径时才填写实际值。这里是 UBSE socket，不是 `/run/containerd/containerd.sock`。
 
 ### A.3 定义查询和分配函数
 
